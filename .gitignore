@@ -1,0 +1,14 @@
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
+tfplan
+override.tf
+override.tf.json
+.env
+*.pem
+candidates_policy.json
+.DS_Store
+.vscode/
