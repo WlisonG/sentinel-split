@@ -1,0 +1,33 @@
+name: bootstrap
+
+# Se ejecuta UNA vez a mano. Usa las llaves temporales del Environment "production"
+# para crear el bucket de state y el rol OIDC. Después, el pipeline principal usa
+# solo OIDC y las llaves se eliminan de Secrets.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bootstrap
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      OWNER_NAME: wilson
+      ENV_NAME: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Run bootstrap
+        run: bash bootstrap/bootstrap.sh
