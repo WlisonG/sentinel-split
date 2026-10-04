@@ -4,6 +4,8 @@ name: bootstrap
 # para crear el bucket de state y el rol OIDC. Después, el pipeline principal usa
 # solo OIDC y las llaves se eliminan de Secrets.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
