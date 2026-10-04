@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -36,10 +36,19 @@ jobs:
         run: terraform validate
         working-directory: terraform
 
-  # Prueba 1: sub = repo:<owner>/<repo>:ref:refs/heads/main
+  # Prueba 1: sub esperado = repo:WlisonG/sentinel-split:ref:refs/heads/main
   oidc-check:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
+      - name: Mostrar claims del token OIDC (diagnóstico)
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$TOKEN"
+          P=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#P} % 4 )) -ne 0 ]; do P="${P}="; done
+          echo "$P" | base64 -d | jq '{iss, sub, aud, repository, repository_owner, ref, environment}'
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
@@ -48,11 +57,20 @@ jobs:
       - name: Quién soy
         run: aws sts get-caller-identity
 
-  # Prueba 2: sub = repo:<owner>/<repo>:environment:production
+  # Prueba 2: sub esperado = repo:WlisonG/sentinel-split:environment:production
   oidc-check-production:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: production
     steps:
+      - name: Mostrar claims del token OIDC (diagnóstico)
+        run: |
+          TOKEN=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r .value)
+          echo "::add-mask::$TOKEN"
+          P=$(echo "$TOKEN" | cut -d. -f2 | tr '_-' '/+')
+          while [ $(( ${#P} % 4 )) -ne 0 ]; do P="${P}="; done
+          echo "$P" | base64 -d | jq '{iss, sub, aud, repository, repository_owner, ref, environment}'
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
