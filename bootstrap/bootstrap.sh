@@ -95,6 +95,8 @@ TRUST="$(jq -n --arg oidc "$OIDC_ARN" --argjson subs "$SUBS_JSON" '{
 # Permisos del pipeline (mínimo privilegio razonado):
 #  - ec2/eks: solo en la región de trabajo
 #  - IAM: solo roles eks-<owner>-*, NUNCA su propio rol (sin escalada de privilegios)
+#  - iam:GetRole solo sobre 3 service-linked roles: EKS valida con las credenciales del llamador
+#    que el SLR del node group existe (CreateNodegroup falla con 400 si no puede leerlo)
 #  - AttachRolePolicy: solo las políticas gestionadas de EKS necesarias (no AdministratorAccess)
 #  - PassRole: solo hacia eks.amazonaws.com / ec2.amazonaws.com
 #  - S3: solo el bucket de state
@@ -115,6 +117,14 @@ POLICY="$(jq -n --arg region "$REGION" --arg acct "$ACCOUNT_ID" \
       Resource: [
         "arn:aws:logs:\($region):\($acct):log-group:/aws/eks/eks-*",
         "arn:aws:logs:\($region):\($acct):log-group:/aws/eks/eks-*:*"
+      ] },
+
+    { Sid: "ReadEksServiceLinkedRoles", Effect: "Allow",
+      Action: "iam:GetRole",
+      Resource: [
+        "arn:aws:iam::\($acct):role/aws-service-role/eks.amazonaws.com/AWSServiceRoleForAmazonEKS",
+        "arn:aws:iam::\($acct):role/aws-service-role/eks-nodegroup.amazonaws.com/AWSServiceRoleForAmazonEKSNodegroup",
+        "arn:aws:iam::\($acct):role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling"
       ] },
 
     { Sid: "EksRolesLifecycle", Effect: "Allow",
