@@ -62,7 +62,24 @@ aws s3api put-bucket-policy --bucket "$BUCKET" --policy "$BUCKET_POLICY"
 # --- 2. Rol OIDC para GitHub Actions
 # Trust policy: solo este repo, y solo rama main o el environment indicado.
 # OJO: no hay iam:UpdateAssumeRolePolicy, así que debe quedar bien desde la creación.
-TRUST="$(jq -n --arg oidc "$OIDC_ARN" --arg repo "$REPO" --arg env "$ENV_NAME" '{
+#
+# El token real de GitHub puede traer el sub con los IDs numéricos del dueño y del repo:
+#   repo:OWNER@OWNER_ID/REPO@REPO_ID:environment:production
+# En vez del formato clásico repo:OWNER/REPO:environment:production.
+# Aceptamos ambos (solo para ESTE repo, rama main y este environment). Los IDs vienen
+# del contexto de GitHub (OWNER_ID / REPO_ID), no se escriben a mano.
+REPO_OWNER="${REPO%%/*}"
+REPO_NAME="${REPO#*/}"
+SUBJECTS=("repo:${REPO}:ref:refs/heads/main" "repo:${REPO}:environment:${ENV_NAME}")
+if [ -n "${OWNER_ID:-}" ] && [ -n "${REPO_ID:-}" ]; then
+  ID_PREFIX="repo:${REPO_OWNER}@${OWNER_ID}/${REPO_NAME}@${REPO_ID}"
+  SUBJECTS+=("${ID_PREFIX}:ref:refs/heads/main" "${ID_PREFIX}:environment:${ENV_NAME}")
+fi
+SUBS_JSON="$(printf '%s\n' "${SUBJECTS[@]}" | jq -R . | jq -s .)"
+echo "==> Subjects permitidos en la trust policy:"
+echo "$SUBS_JSON" | jq -r '.[]' | sed 's/^/    /'
+
+TRUST="$(jq -n --arg oidc "$OIDC_ARN" --argjson subs "$SUBS_JSON" '{
   Version: "2012-10-17",
   Statement: [{
     Effect: "Allow",
@@ -70,10 +87,7 @@ TRUST="$(jq -n --arg oidc "$OIDC_ARN" --arg repo "$REPO" --arg env "$ENV_NAME" '
     Action: "sts:AssumeRoleWithWebIdentity",
     Condition: { StringEquals: {
       "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-      "token.actions.githubusercontent.com:sub": [
-        "repo:\($repo):ref:refs/heads/main",
-        "repo:\($repo):environment:\($env)"
-      ]
+      "token.actions.githubusercontent.com:sub": $subs
     }}
   }]
 }')"

@@ -20,6 +20,9 @@ jobs:
     env:
       OWNER_NAME: wilson
       ENV_NAME: production
+      ROLE_SUFFIX: -v2                       # el rol original no se puede corregir ni borrar
+      OWNER_ID: ${{ github.repository_owner_id }}
+      REPO_ID: ${{ github.repository_id }}
     steps:
       - uses: actions/checkout@v4
 
