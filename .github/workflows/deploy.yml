@@ -1,29 +1,33 @@
 name: deploy
 
-# Etapa 1: valida Terraform y comprueba que el rol OIDC se puede asumir.
-# Los jobs plan / apply / deploy-k8s / smoke-test se añadirán después.
+# validate -> plan -> apply -> deploy-k8s (con smoke test de extremo a extremo)
+# Autenticación solo por OIDC (rol sentinel-wilson-github-actions-v2): sin llaves en Secrets.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  id-token: write   # necesario para pedir el token OIDC a GitHub
+  id-token: write   # token OIDC para asumir el rol de AWS
   contents: read
 
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_VERSION: "^1.10.0"
+
 jobs:
   validate:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: "^1.10.0"
+          terraform_version: ${{ env.TF_VERSION }}
 
       - name: terraform fmt
         run: terraform fmt -check -recursive
@@ -37,27 +41,174 @@ jobs:
         run: terraform validate
         working-directory: terraform
 
-  # Prueba 1: asume el rol desde la rama main (sub con IDs numéricos)
-  oidc-check:
-    runs-on: ubuntu-24.04
+      - uses: terraform-linters/setup-tflint@v4
+
+      - name: tflint
+        run: |
+          tflint --init
+          tflint --recursive --minimum-failure-severity=error
+        working-directory: terraform
+
+      - name: Validar manifiestos de Kubernetes (kubeconform, sin cluster)
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz kubeconform
+          export GATEWAY_VPC_CIDR=10.0.0.0/16 BACKEND_HOST=example.internal
+          mkdir -p "$RUNNER_TEMP/check"
+          for f in k8s/backend/*.yaml; do envsubst '${GATEWAY_VPC_CIDR}' < "$f" > "$RUNNER_TEMP/check/backend-$(basename "$f")"; done
+          for f in k8s/gateway/*.yaml; do envsubst '${BACKEND_HOST}' < "$f" > "$RUNNER_TEMP/check/gateway-$(basename "$f")"; done
+          ./kubeconform -strict -summary "$RUNNER_TEMP/check"
+
+  plan:
+    needs: validate
+    runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Quién soy
-        run: aws sts get-caller-identity
+      - name: terraform init
+        run: terraform init -input=false
+        working-directory: terraform
 
-  # Prueba 2: asume el rol desde el Environment production
-  oidc-check-production:
-    runs-on: ubuntu-24.04
+      - name: terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan
+        working-directory: terraform
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+          retention-days: 1
+
+  apply:
+    needs: plan
+    runs-on: ubuntu-latest
     environment: production
     steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
-      - name: Quién soy
-        run: aws sts get-caller-identity
+      - name: terraform init
+        run: terraform init -input=false
+        working-directory: terraform
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: terraform apply (el plan guardado)
+        run: terraform apply -input=false -no-color tfplan
+        working-directory: terraform
+
+  deploy-k8s:
+    needs: apply
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Leer outputs de Terraform
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+          {
+            echo "GATEWAY_CLUSTER=$(terraform output -raw gateway_cluster_name)"
+            echo "BACKEND_CLUSTER=$(terraform output -raw backend_cluster_name)"
+            echo "GATEWAY_VPC_CIDR=$(terraform output -raw gateway_vpc_cidr)"
+          } >> "$GITHUB_ENV"
+
+      - name: Kubeconfig de ambos clusters
+        run: |
+          aws eks update-kubeconfig --name "$BACKEND_CLUSTER" --kubeconfig "$RUNNER_TEMP/backend.kubeconfig"
+          aws eks update-kubeconfig --name "$GATEWAY_CLUSTER" --kubeconfig "$RUNNER_TEMP/gateway.kubeconfig"
+
+      - name: Desplegar backend (NLB interno)
+        env:
+          KUBECONFIG: ${{ runner.temp }}/backend.kubeconfig
+        run: |
+          rm -rf "$RUNNER_TEMP/backend" && mkdir -p "$RUNNER_TEMP/backend"
+          for f in k8s/backend/*.yaml; do
+            envsubst '${GATEWAY_VPC_CIDR}' < "$f" > "$RUNNER_TEMP/backend/$(basename "$f")"
+          done
+          kubectl create namespace sentinel --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply --dry-run=server -f "$RUNNER_TEMP/backend"
+          kubectl apply -f "$RUNNER_TEMP/backend"
+          kubectl -n sentinel rollout status deployment/backend --timeout=300s
+
+          echo "Esperando el hostname del NLB interno..."
+          for i in $(seq 1 40); do
+            HOST="$(kubectl -n sentinel get svc backend -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+            [ -n "$HOST" ] && break
+            sleep 15
+          done
+          [ -n "$HOST" ] || { echo "El NLB interno no se creó a tiempo"; exit 1; }
+          echo "BACKEND_HOST=$HOST" >> "$GITHUB_ENV"
+          echo "Backend interno: $HOST"
+
+      - name: Desplegar proxy (NLB público)
+        env:
+          KUBECONFIG: ${{ runner.temp }}/gateway.kubeconfig
+        run: |
+          rm -rf "$RUNNER_TEMP/gateway" && mkdir -p "$RUNNER_TEMP/gateway"
+          for f in k8s/gateway/*.yaml; do
+            envsubst '${BACKEND_HOST}' < "$f" > "$RUNNER_TEMP/gateway/$(basename "$f")"
+          done
+          kubectl create namespace sentinel --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply --dry-run=server -f "$RUNNER_TEMP/gateway"
+          kubectl apply -f "$RUNNER_TEMP/gateway"
+          # Si cambia el hostname del backend, el ConfigMap cambia: reinicia para recargar nginx
+          kubectl -n sentinel rollout restart deployment/proxy
+          kubectl -n sentinel rollout status deployment/proxy --timeout=300s
+
+          echo "Esperando el hostname del NLB público..."
+          for i in $(seq 1 40); do
+            HOST="$(kubectl -n sentinel get svc proxy -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')"
+            [ -n "$HOST" ] && break
+            sleep 15
+          done
+          [ -n "$HOST" ] || { echo "El NLB público no se creó a tiempo"; exit 1; }
+          echo "PROXY_HOST=$HOST" >> "$GITHUB_ENV"
+          echo "Proxy público: $HOST"
+
+      - name: Smoke test (internet -> proxy -> peering -> backend)
+        run: |
+          # El DNS del NLB y el registro de targets tardan unos minutos
+          for i in $(seq 1 30); do
+            RESP="$(curl -fsS --max-time 5 "http://${PROXY_HOST}/" || true)"
+            if echo "$RESP" | grep -q "Hello from backend"; then
+              echo "OK: el proxy alcanzó el backend -> $RESP"
+              echo "### Smoke test OK" >> "$GITHUB_STEP_SUMMARY"
+              echo "\`curl http://${PROXY_HOST}/\` respondió: \`$RESP\`" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Intento $i/30 sin respuesta todavía..."
+            sleep 20
+          done
+          echo "El smoke test falló: el proxy no devolvió 'Hello from backend'"
+          exit 1

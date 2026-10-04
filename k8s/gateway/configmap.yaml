@@ -1,0 +1,25 @@
+# Proxy público (cluster eks-gateway). El pipeline procesa estos archivos con envsubst '${BACKEND_HOST}'.
+# El namespace 'sentinel' lo crea el pipeline antes del apply.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+  namespace: sentinel
+data:
+  default.conf: |
+    server {
+      listen 8080;
+
+      location = /healthz {
+        access_log off;
+        return 200 'ok';
+      }
+
+      location / {
+        proxy_pass http://${BACKEND_HOST}:80;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+      }
+    }

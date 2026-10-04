@@ -1,0 +1,23 @@
+# Backend interno (cluster eks-backend). El pipeline procesa estos archivos con envsubst '${GATEWAY_VPC_CIDR}'.
+# El namespace 'sentinel' lo crea el pipeline antes del apply.
+# NLB INTERNO: sin IP pública, vive en las subnets privadas.
+# loadBalancerSourceRanges limita el acceso al CIDR de vpc-gateway (llega por el peering).
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+  namespace: sentinel
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
+spec:
+  type: LoadBalancer
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      nodePort: 30080 # fijo: coincide con node_ingress_port del módulo eks
+  loadBalancerSourceRanges:
+    - ${GATEWAY_VPC_CIDR}

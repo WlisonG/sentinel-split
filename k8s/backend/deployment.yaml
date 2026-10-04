@@ -1,0 +1,47 @@
+# Backend interno (cluster eks-backend). El pipeline procesa estos archivos con envsubst '${GATEWAY_VPC_CIDR}'.
+# El namespace 'sentinel' lo crea el pipeline antes del apply.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: sentinel
+  labels:
+    app: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+    spec:
+      containers:
+        - name: backend
+          image: hashicorp/http-echo:1.0
+          args:
+            - "-listen=:8080"
+            - "-text=Hello from backend"
+          ports:
+            - containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 64Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]

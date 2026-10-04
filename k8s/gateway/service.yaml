@@ -1,0 +1,18 @@
+# Proxy público (cluster eks-gateway). El pipeline procesa estos archivos con envsubst '${BACKEND_HOST}'.
+# El namespace 'sentinel' lo crea el pipeline antes del apply.
+# NLB público: único punto de entrada desde internet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: proxy
+  namespace: sentinel
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+spec:
+  type: LoadBalancer
+  selector:
+    app: proxy
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
