@@ -1,0 +1,62 @@
+name: deploy
+
+# Etapa 1: valida Terraform y comprueba que el rol OIDC se puede asumir.
+# Los jobs plan / apply / deploy-k8s / smoke-test se añadirán después.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write   # necesario para pedir el token OIDC a GitHub
+  contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "^1.10.0"
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive
+        working-directory: terraform
+
+      - name: terraform init (sin backend)
+        run: terraform init -backend=false -input=false
+        working-directory: terraform
+
+      - name: terraform validate
+        run: terraform validate
+        working-directory: terraform
+
+  # Prueba 1: sub = repo:<owner>/<repo>:ref:refs/heads/main
+  oidc-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Quién soy
+        run: aws sts get-caller-identity
+
+  # Prueba 2: sub = repo:<owner>/<repo>:environment:production
+  oidc-check-production:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Quién soy
+        run: aws sts get-caller-identity
